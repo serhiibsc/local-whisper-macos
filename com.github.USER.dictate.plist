@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.github.USER.dictate</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/ABSOLUTE/PATH/TO/local-whisper-macos/run.sh</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Only relaunch if the app crashed (non-zero exit). Quitting from the
+         menu exits cleanly, so it stays closed instead of respawning. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- Don't respawn faster than every 30s, so a crash-on-launch can't spin
+         the CPU (and reload the Whisper model) in a tight loop. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/dictate.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/dictate.err</string>
+</dict>
+</plist>

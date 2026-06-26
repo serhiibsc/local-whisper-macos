@@ -1,0 +1,8 @@
+mlx-whisper
+sounddevice
+numpy
+pynput
+pyperclip
+ollama
+rumps          # menu-bar app (app.py); not needed for the terminal dictate.py
+pyobjc-framework-ApplicationServices  # app.py: Accessibility prompt (AppKit comes via rumps)

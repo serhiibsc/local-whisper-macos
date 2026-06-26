@@ -4,3 +4,11 @@ __pycache__/
 venv/
 .DS_Store
 *.log
+*.err
+
+# py2app build artifacts (the app is built into dist/ then installed to
+# ~/Applications — no need to track the generated bundle).
+build/
+dist/
+*.egg-info/
+.eggs/
