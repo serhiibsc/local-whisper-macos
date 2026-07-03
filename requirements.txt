@@ -1,0 +1,11 @@
+mlx-whisper
+sounddevice
+numpy
+pynput
+pyperclip
+ollama
+
+# Menu-bar app (app.py): status item, permission prompts, and the key intercept.
+rumps
+pyobjc-framework-ApplicationServices
+pyobjc-framework-Quartz
