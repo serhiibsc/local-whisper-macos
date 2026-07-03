@@ -154,11 +154,15 @@ def add_reminder(text):
     end tell
 end run'''
     try:
+        # Generous timeout: the first call blocks on the "control Reminders"
+        # permission prompt; once granted, later calls return in well under a second.
         r = subprocess.run(["osascript", "-e", script, text],
-                           capture_output=True, text=True, timeout=15)
+                           capture_output=True, text=True, timeout=60)
         if r.returncode == 0:
             return True
         log(f"reminders failed: {r.stderr.strip() or 'unknown error'}")
+    except subprocess.TimeoutExpired:
+        log("reminders timed out — approve 'Dictate → Reminders' (Automation) and retry")
     except OSError as e:
         log(f"reminders error: {e}")
     return False
