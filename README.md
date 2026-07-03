@@ -66,7 +66,17 @@ attaches the permissions to it and they stick.
 2. Add it to **Login Items** (System Settings → General → Login Items).
 
 It's an alias build referencing this repo/venv by path, so re-run `./build_app.sh`
-after moving the repo or recreating the venv. Logs: `~/Library/Logs/Dictate.log`.
+after moving the repo or recreating the venv.
+
+### Logs
+
+The menu-bar app writes a timestamped log to `~/Library/Logs/Dictate.log`
+(errors to `Dictate.err`) — each take records what was heard, cleaned, and
+pasted or sent to Reminders. Watch it live with:
+
+```bash
+tail -f ~/Library/Logs/Dictate.log
+```
 
 ## Configuration
 
