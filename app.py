@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Menu-bar front-end for the dictate.py pipeline.
 
-Blank when idle. Hold the hotkey (right-Option) and the active language's flag
-appears (🇬🇧 / 🇺🇦) — that's "listening" and a way to check the language; a
-short hold isn't transcribed. Processing shows ⏳. While holding, tap right-Shift
-to switch language, Delete to cancel, or R to send the take to Apple Reminders
-(📅). A reminder flashes 📅 on success or 🔴 on error.
+Shows the active language's flag (🇬🇧 / 🇺🇦) when idle. Hold the hotkey
+(right-Option) to record — 🔴 while recording, 📅 if the take is a reminder.
+Takes queue and transcribe sequentially; pending takes show as ⏳N, so you can
+keep recording without waiting. Results go to the clipboard. While holding, tap
+right-Shift to switch language, Delete to cancel, or R to send the take to
+Reminders (a reminder flashes 📅 on success, ⚠️ on error). The menu has Reset
+(clear the queue and recover) and Quit.
 """
 
 import os
@@ -33,37 +35,23 @@ from Quartz import CGPreflightListenEventAccess, CGRequestListenEventAccess
 import dictate
 
 FLAGS = {"en": "🇬🇧", "uk": "🇺🇦"}   # change "🇬🇧" to "🇺🇸" if you prefer
-
-
-def _icon(state):
-    """Menu-bar glyph for a pipeline state (blank when idle)."""
-    if state == "recording":
-        return FLAGS.get(dictate.LANGUAGE, "🏳️")
-    if state in ("recording_reminder", "reminder_ok"):
-        return "📅"
-    if state == "busy":
-        return "⏳"
-    if state == "error":
-        return "🔴"
-    return ""
+FLASH_TICKS = 12                     # how long a result glyph lingers (~2.4s)
 
 
 class DictateApp(rumps.App):
     def __init__(self):
         dictate.load_settings()
-        super().__init__(_icon("idle"))
-        self.state = "idle"
+        super().__init__(FLAGS.get(dictate.LANGUAGE, "🏳️"))
         self._pending_note = None
-        self._transient_ticks = 0        # counts a "reminder_ok"/"error" back to idle
-        self.menu = [self._language_menu()]
+        self._flash = None            # transient result glyph: 📅 (reminder) / ⚠️ (error)
+        self._flash_ticks = 0
+        self.menu = [self._language_menu(), rumps.MenuItem("Reset", callback=self._reset)]
 
         self._request_permissions()
 
         # Pipeline callbacks fire on background threads, but AppKit must only be
-        # touched on the main thread — so they stash state and a Timer repaints.
-        self.core = dictate.Dictation(on_state=self._on_state,
-                                      on_language=self._on_language,
-                                      on_notify=self._on_notify)
+        # touched on the main thread — the Timer repaints from live core state.
+        self.core = dictate.Dictation(on_done=self._on_done, on_language=self._on_language)
         rumps.Timer(self._refresh, 0.2).start()
         self.listener = self.core.listener()
         self.listener.start()
@@ -74,7 +62,7 @@ class DictateApp(rumps.App):
 
     @staticmethod
     def _request_permissions():
-        """Prompt for the two grants the hotkey needs: Accessibility (to paste)
+        """Prompt for the two grants the hotkey needs: Accessibility (to copy)
         and Input Monitoring (to see the key). Both attach to the "Dictate"
         bundle and stick once enabled."""
         if not AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True}):
@@ -82,6 +70,15 @@ class DictateApp(rumps.App):
         if not CGPreflightListenEventAccess():
             CGRequestListenEventAccess()
             print("Enable 'Dictate' in Privacy & Security → Input Monitoring, then relaunch.")
+
+    def _glyph(self):
+        """Menu-bar title for the current state (rumps reserves `_icon`)."""
+        c = self.core
+        if c.recording:
+            return "📅" if c.reminder_mode else "🔴"
+        if c.pending:
+            return f"⏳{c.pending}"
+        return self._flash or FLAGS.get(dictate.LANGUAGE, "🏳️")
 
     def _language_menu(self):
         menu = rumps.MenuItem("Language")
@@ -96,22 +93,28 @@ class DictateApp(rumps.App):
     def _set_language(self, sender):
         dictate.save_language(sender.code)   # _refresh syncs the checkmarks
 
+    def _reset(self, _sender):
+        self.core.reset()
+        self._flash, self._flash_ticks = None, 0
+
+    def _on_done(self, outcome, detail):
+        # Worker thread: flash a result glyph and post a notification.
+        if outcome == "reminder_ok":
+            self._flash, self._flash_ticks = "📅", FLASH_TICKS
+            self._pending_note = ("Added to Reminders", detail or "")
+        elif outcome == "error":
+            self._flash, self._flash_ticks = "⚠️", FLASH_TICKS
+            self._pending_note = ("Dictation error", detail or "see the log")
+
     def _on_language(self, code, label):
         self._pending_note = ("Dictate", f"{FLAGS.get(code, '')} {label}")
 
-    def _on_notify(self, title, message):
-        self._pending_note = (title, message)
-
-    def _on_state(self, state):
-        self.state = state
-        self._transient_ticks = 12 if state in ("reminder_ok", "error") else 0
-
     def _refresh(self, _timer):
-        self.title = _icon(self.state)
-        if self._transient_ticks:
-            self._transient_ticks -= 1
-            if not self._transient_ticks:
-                self.state = "idle"
+        self.title = self._glyph()
+        if self._flash_ticks:
+            self._flash_ticks -= 1
+            if not self._flash_ticks:
+                self._flash = None
         for item in self._lang_items:
             item.state = (item.code == dictate.LANGUAGE)
         if self._pending_note:
@@ -127,7 +130,7 @@ class DictateApp(rumps.App):
             self.listener.stop()
         except Exception:
             pass
-        if self.core.recorder.active:
+        if self.core.recording:
             self.core.recorder.stop()
 
     def run(self):

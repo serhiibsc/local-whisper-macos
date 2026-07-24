@@ -2,12 +2,13 @@
 
 Local push-to-talk dictation for Apple Silicon. Hold a key, speak, release — your
 speech is transcribed on-device with [MLX-Whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper),
-tidied up by a local LLM via [Ollama](https://ollama.com), and pasted at the
-cursor. Everything runs offline — no cloud, no API keys, no audio leaves the machine.
+tidied up by a local LLM via [Ollama](https://ollama.com), and placed on your
+clipboard. Everything runs offline — no cloud, no API keys, no audio leaves the machine.
 
 The cleanup pass fixes grammar and punctuation; say "as a list" and it formats a
-markdown list. English and Ukrainian are supported, and a take can go straight to
-Apple Reminders instead of the cursor.
+markdown list. English and Ukrainian are supported, takes queue and transcribe
+in the background so you can keep recording, and a take can go straight to Apple
+Reminders instead of the clipboard.
 
 ## Requirements
 
@@ -29,8 +30,9 @@ ollama pull gemma3:12b
 python dictate.py
 ```
 
-Hold **right-Option (⌥)**, speak, release. macOS will ask for **Microphone** and
-**Accessibility** — grant both, or it records but can't type.
+Hold **right-Option (⌥)**, speak, release. macOS will ask for **Microphone** (to
+record) and **Accessibility** (for the hotkey) — grant both. The result is copied
+to your clipboard; press ⌘V to paste (set `AUTO_PASTE = True` to paste for you).
 
 ## Usage
 
@@ -38,21 +40,24 @@ While holding the hotkey:
 
 | Gesture | Action |
 |---|---|
-| speak, release | transcribe → clean → paste |
+| speak, release | transcribe → clean → clipboard (⌘V to paste) |
 | release within `MIN_HOLD_SECONDS` | discard (accidental tap / language peek) |
 | tap **right-Shift** | switch language (English ⇄ Ukrainian) |
 | tap **Delete** | cancel the take |
 | tap **R** | send the take to Apple Reminders (due today at noon) |
 
-The mic opens only while you hold the key, so the macOS recording indicator
-shows just during dictation.
+You can start the next recording immediately — takes queue and transcribe
+**sequentially** in the background. The mic opens only while you hold the key.
 
 ## Menu-bar app
 
-`python app.py` runs the same pipeline as a menu-bar item — **blank when idle**,
-the language flag (🇬🇧 / 🇺🇦) while recording, ⏳ while processing, 📅 for a
-reminder, 🔴 on error. Language is also switchable from its **Language** menu and
-remembered across restarts (`~/.config/local-whisper-dictate/settings.json`).
+`python app.py` runs the same pipeline as a menu-bar item. It shows the active
+language **flag** (🇬🇧 / 🇺🇦) when idle, **🔴** while recording, and **⏳N**
+while N takes transcribe — keep recording without waiting; they're processed
+sequentially and each result lands on the clipboard. A reminder flashes **📅**
+(added) or **⚠️** (error). The menu has **Language** (also remembered across
+restarts in `~/.config/local-whisper-dictate/settings.json`) and **Reset** —
+which clears the queue and recovers the app without a restart.
 
 ### Run at login
 
@@ -72,7 +77,7 @@ after moving the repo or recreating the venv.
 
 The menu-bar app writes a timestamped log to `~/Library/Logs/Dictate.log`
 (errors to `Dictate.err`) — each take records what was heard, cleaned, and
-pasted or sent to Reminders. Watch it live with:
+copied or sent to Reminders. Watch it live with:
 
 ```bash
 tail -f ~/Library/Logs/Dictate.log
@@ -94,7 +99,7 @@ Constants at the top of `dictate.py`:
 | `OLLAMA_MODEL` | `gemma3:12b` | cleanup model (non-thinking; avoid "reasoning" models) |
 | `OLLAMA_KEEP_ALIVE` | `"30m"` | keep the model warm between utterances |
 | `LANGUAGE` | `"en"` | `"en"` or `"uk"` |
-| `AUTO_PASTE` | `True` | `False` = copy to clipboard only |
+| `AUTO_PASTE` | `False` | clipboard only; `True` = also ⌘V-paste after copying |
 
 To add languages, edit `LANGUAGES` in `dictate.py` (any
 [Whisper code](https://github.com/openai/whisper#available-models-and-languages))

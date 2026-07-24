@@ -37,7 +37,7 @@ OLLAMA_KEEP_ALIVE = "30m"              # keep the model resident between utteran
 
 SAMPLE_RATE = 16_000
 MIN_HOLD_SECONDS = 1.5                 # shorter holds are discarded, not transcribed
-AUTO_PASTE = True                      # False = copy to clipboard only
+AUTO_PASTE = False                     # False = copy to clipboard only; True = also ⌘V
 REMINDER_HOUR = 12                     # reminders are due today at this hour (24h)
 
 LANGUAGE = "en"                        # active Whisper language; app.py toggles it live
@@ -127,8 +127,12 @@ def transcribe(audio):
     return result["text"].strip()
 
 
+# A timeout so a wedged Ollama server can't hang the worker thread indefinitely.
+_ollama = ollama.Client(host=OLLAMA_HOST, timeout=60)
+
+
 def clean_up(text):
-    reply = ollama.chat(
+    reply = _ollama.chat(
         model=OLLAMA_MODEL,
         messages=[{"role": "system", "content": CLEANUP_PROMPT},
                   {"role": "user", "content": text}],
@@ -204,8 +208,8 @@ def warm_up():
     if not ensure_ollama():
         return
     try:
-        ollama.chat(model=OLLAMA_MODEL, messages=[{"role": "user", "content": "hi"}],
-                    options={"num_predict": 1}, keep_alive=OLLAMA_KEEP_ALIVE)
+        _ollama.chat(model=OLLAMA_MODEL, messages=[{"role": "user", "content": "hi"}],
+                     options={"num_predict": 1}, keep_alive=OLLAMA_KEEP_ALIVE)
     except Exception:
         pass
 
@@ -221,19 +225,18 @@ def paste(text):
 
 
 def run_pipeline(audio, to_reminder=False):
-    """Transcribe → clean → paste (or add to Reminders).
+    """Transcribe → clean → clipboard (or add to Reminders).
 
-    Returns (outcome, detail) where outcome is a UI state: "idle", "reminder_ok",
-    or "error".
+    Returns (outcome, detail): outcome is "ok", "reminder_ok", or "error".
     """
     if audio.size < SAMPLE_RATE * MIN_HOLD_SECONDS:
         log("short hold, skipped")
-        return "idle", None
+        return "ok", None
     started = time.time()
     heard = transcribe(audio)
     if not heard:
         log("no speech detected")
-        return "idle", None
+        return "ok", None
     log(f"heard:   {heard}")
 
     if to_reminder:
@@ -245,25 +248,40 @@ def run_pipeline(audio, to_reminder=False):
     cleaned = clean_up(heard)
     log(f"cleaned: {cleaned}")
     paste(cleaned)
-    log(f"pasted  ({time.time() - started:.1f}s)")
-    return "idle", None
+    log(f"{'pasted' if AUTO_PASTE else 'copied'}  ({time.time() - started:.1f}s)")
+    return "ok", None
 
 
 class Dictation:
-    """Drives the hotkey: record → transcribe → clean → paste/remind.
+    """Drives the hotkey: record → queue → transcribe → clean → clipboard/remind.
 
-    Callbacks let a UI reflect status. `on_state` receives one of "recording",
-    "recording_reminder", "busy", "idle", "reminder_ok", "error"; `on_language`
-    a (code, label); `on_notify` a (title, message). All default to no-ops.
+    Takes are queued and handled by one worker thread, so recordings never block
+    each other. `on_done(outcome, detail)` fires per take (outcome "ok" /
+    "reminder_ok" / "error"); `on_language(code, label)` on a switch. Live state
+    for a UI: `recording`, `reminder_mode`, `pending`. Callbacks default to no-ops.
     """
 
-    def __init__(self, on_state=None, on_language=None, on_notify=None):
+    def __init__(self, on_done=None, on_language=None):
         self.recorder = Recorder()
-        self.busy = threading.Lock()
-        self.on_state = on_state or (lambda state: None)
+        self.on_done = on_done or (lambda outcome, detail: None)
         self.on_language = on_language or (lambda code, label: None)
-        self.on_notify = on_notify or (lambda title, message: None)
         self._reminder = False
+        self._processing = False
+        self.jobs = queue.Queue()
+        threading.Thread(target=self._run_worker, daemon=True).start()
+
+    @property
+    def recording(self):
+        return self.recorder.active
+
+    @property
+    def reminder_mode(self):
+        return self._reminder
+
+    @property
+    def pending(self):
+        """Takes queued plus the one in flight — drives the ⏳N counter."""
+        return self.jobs.qsize() + self._processing
 
     def on_press(self, key):
         if key == LANG_CYCLE_KEY and self.recorder.active:
@@ -272,7 +290,6 @@ class Dictation:
         elif key == HOTKEY and not self.recorder.active:
             self._reminder = False
             self.recorder.start()
-            self.on_state("recording")
             log("recording…")
 
     def on_release(self, key):
@@ -280,14 +297,11 @@ class Dictation:
             return
         audio = self.recorder.stop()
         to_reminder, self._reminder = self._reminder, False
-        self.on_state("busy")
-        threading.Thread(target=self._process, args=(audio, to_reminder),
-                         daemon=True).start()
+        self.jobs.put((audio, to_reminder))   # queued; the mic is free immediately
 
     def _discard(self):
         if self.recorder.active:
             self.recorder.stop()
-            self.on_state("idle")
 
     def _cancel_take(self):
         if self.recorder.active:
@@ -296,7 +310,6 @@ class Dictation:
 
     def _toggle_reminder(self):
         self._reminder = not self._reminder
-        self.on_state("recording_reminder" if self._reminder else "recording")
         log(f"reminder mode {'on' if self._reminder else 'off'}")
 
     def _cycle_language(self):
@@ -329,21 +342,33 @@ class Dictation:
             pass
         return event
 
-    def _process(self, audio, to_reminder):
-        if not self.busy.acquire(blocking=False):
-            return  # drop overlapping utterances rather than queue them
-        try:
-            outcome, detail = run_pipeline(audio, to_reminder)
-        except Exception as e:
-            log(f"error: {e}")
-            outcome, detail = "error", str(e)
-        finally:
-            self.busy.release()
-        self.on_state(outcome)
-        if outcome == "reminder_ok":
-            self.on_notify("Added to Reminders", detail or "")
-        elif outcome == "error":
-            self.on_notify("Dictation error", detail or "see the log")
+    def _run_worker(self):
+        """Process queued takes one at a time (sequential transcription)."""
+        while True:
+            audio, to_reminder = self.jobs.get()
+            self._processing = True
+            try:
+                outcome, detail = run_pipeline(audio, to_reminder)
+            except Exception as e:
+                log(f"error: {e}")
+                outcome, detail = "error", str(e)
+            finally:
+                self._processing = False
+                self.jobs.task_done()
+            self.on_done(outcome, detail)
+
+    def reset(self):
+        """Recover without restarting: stop any recording and drop the backlog."""
+        self._discard()
+        dropped = 0
+        while True:
+            try:
+                self.jobs.get_nowait()
+                self.jobs.task_done()
+                dropped += 1
+            except queue.Empty:
+                break
+        log(f"reset — dropped {dropped} queued")
 
     def listener(self):
         return keyboard.Listener(on_press=self.on_press, on_release=self.on_release,
