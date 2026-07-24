@@ -29,6 +29,9 @@ HOTKEY = keyboard.Key.alt_r            # hold to dictate
 LANG_CYCLE_KEY = keyboard.Key.shift_r  # tap to switch language
 CANCEL_KEYCODE = 51                    # Delete: discard the take
 REMINDER_KEYCODE = 15                  # R: send the take to Apple Reminders
+# Event types macOS sends when it disables our tap; it never re-enables it, so
+# we recreate the listener when we see one. (kCGEventTapDisabledBy{Timeout,User})
+_TAP_DISABLED = (0xFFFFFFFE, 0xFFFFFFFF)
 
 WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo"
 OLLAMA_MODEL = "gemma3:12b"
@@ -267,8 +270,11 @@ class Dictation:
         self.on_language = on_language or (lambda code, label: None)
         self._reminder = False
         self._processing = False
+        self._tap_dead = False
+        self._listener = None
         self.jobs = queue.Queue()
         threading.Thread(target=self._run_worker, daemon=True).start()
+        threading.Thread(target=self._watch_listener, daemon=True).start()
 
     @property
     def recording(self):
@@ -323,8 +329,12 @@ class Dictation:
 
     def _darwin_intercept(self, event_type, event):
         """While recording, swallow Delete and R so they trigger their gesture
-        instead of editing/typing in the focused app. Runs for every keystroke,
+        instead of editing/typing in the focused app; also notice when macOS
+        disables the tap so the watchdog can revive it. Runs for every keystroke,
         so it stays cheap and never raises."""
+        if event_type in _TAP_DISABLED:
+            self._tap_dead = True
+            return event
         try:
             if self.recorder.active and Quartz is not None:
                 keycode = Quartz.CGEventGetIntegerValueField(
@@ -358,8 +368,8 @@ class Dictation:
             self.on_done(outcome, detail)
 
     def reset(self):
-        """Recover without restarting: stop any recording and drop the backlog."""
-        self._discard()
+        """Recover without restarting the app: stop recording, drop the backlog,
+        and recreate the event tap."""
         dropped = 0
         while True:
             try:
@@ -369,10 +379,35 @@ class Dictation:
             except queue.Empty:
                 break
         log(f"reset — dropped {dropped} queued")
+        self._restart_listening()
 
-    def listener(self):
-        return keyboard.Listener(on_press=self.on_press, on_release=self.on_release,
-                                 darwin_intercept=self._darwin_intercept)
+    def start_listening(self):
+        self._listener = keyboard.Listener(
+            on_press=self.on_press, on_release=self.on_release,
+            darwin_intercept=self._darwin_intercept)
+        self._listener.start()
+
+    def stop_listening(self):
+        if self._listener:
+            try:
+                self._listener.stop()
+            except Exception:
+                pass
+
+    def _restart_listening(self):
+        """Recreate the tap: macOS disables an active tap and never re-enables
+        it, which strands the hotkey (and the mic)."""
+        self._tap_dead = False
+        self.stop_listening()
+        self._discard()                 # release the mic if a take was stranded
+        self.start_listening()
+        log("listener restarted")
+
+    def _watch_listener(self):
+        while True:
+            time.sleep(0.5)
+            if self._tap_dead:
+                self._restart_listening()
 
     def run(self):
         load_settings()
@@ -382,11 +417,13 @@ class Dictation:
             print("warning: Ollama not reachable — cleanup will fail until it starts.",
                   file=sys.stderr)
         print(f"Hold {HOTKEY} to dictate. Ctrl-C to quit.\n")
-        with self.listener() as listener:
-            try:
-                listener.join()
-            except KeyboardInterrupt:
-                print("\nbye.")
+        self.start_listening()
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            self.stop_listening()
+            print("\nbye.")
 
 
 if __name__ == "__main__":

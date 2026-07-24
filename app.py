@@ -53,8 +53,7 @@ class DictateApp(rumps.App):
         # touched on the main thread — the Timer repaints from live core state.
         self.core = dictate.Dictation(on_done=self._on_done, on_language=self._on_language)
         rumps.Timer(self._refresh, 0.2).start()
-        self.listener = self.core.listener()
-        self.listener.start()
+        self.core.start_listening()
         threading.Thread(target=dictate.warm_up, daemon=True).start()
 
         atexit.register(self._cleanup)
@@ -126,10 +125,7 @@ class DictateApp(rumps.App):
                 pass
 
     def _cleanup(self):
-        try:
-            self.listener.stop()
-        except Exception:
-            pass
+        self.core.stop_listening()
         if self.core.recording:
             self.core.recorder.stop()
 
